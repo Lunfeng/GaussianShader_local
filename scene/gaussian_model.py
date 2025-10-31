@@ -646,6 +646,10 @@ class GaussianModel:
             'opacity': self._opacity.detach().cpu(),
             'scaling': self._scaling.detach().cpu(),
             'rotation': self._rotation.detach().cpu(),
+            # Densification tracking (optional but useful for mid-training checkpoints)
+            'xyz_gradient_accum': self.xyz_gradient_accum.detach().cpu() if hasattr(self, 'xyz_gradient_accum') else None,
+            'denom': self.denom.detach().cpu() if hasattr(self, 'denom') else None,
+            'max_radii2D': self.max_radii2D.detach().cpu() if hasattr(self, 'max_radii2D') else None,
         }
         
         # BRDF extras (if applicable)
@@ -696,9 +700,23 @@ class GaussianModel:
         
         # Initialize tracking tensors
         num_points = model._xyz.shape[0]
-        model.max_radii2D = torch.zeros((num_points), device=device)
-        model.xyz_gradient_accum = torch.zeros((num_points, 1), device=device)
-        model.denom = torch.zeros((num_points, 1), device=device)
+        model.max_radii2D = state.get('max_radii2D', torch.zeros((num_points), device=device))
+        if isinstance(model.max_radii2D, torch.Tensor):
+            model.max_radii2D = model.max_radii2D.to(device)
+        else:
+            model.max_radii2D = torch.zeros((num_points), device=device)
+            
+        model.xyz_gradient_accum = state.get('xyz_gradient_accum', torch.zeros((num_points, 1), device=device))
+        if isinstance(model.xyz_gradient_accum, torch.Tensor):
+            model.xyz_gradient_accum = model.xyz_gradient_accum.to(device)
+        else:
+            model.xyz_gradient_accum = torch.zeros((num_points, 1), device=device)
+            
+        model.denom = state.get('denom', torch.zeros((num_points, 1), device=device))
+        if isinstance(model.denom, torch.Tensor):
+            model.denom = model.denom.to(device)
+        else:
+            model.denom = torch.zeros((num_points, 1), device=device)
         
         # Restore BRDF extras if present
         if model.brdf and 'extras' in state:
