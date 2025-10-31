@@ -112,6 +112,13 @@ class OptimizationParams(ParamGroup):
         self.lambda_predicted_normal = 2e-1
         self.lambda_delta_reg = 1e-3
         self.fix_brdf_lr = 0
+        # Checkpoint parameters
+        self.save_interval = 10000
+        self.save_at = ""  # Comma-separated iteration numbers
+        self.resume = False
+        self.resume_path = ""
+        self.max_keep = 2
+        self.save_snapshot_ply = False
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -621,3 +621,106 @@ class GaussianModel:
     
     def set_requires_grad(self, attrib_name, state: bool):
         getattr(self, f"_{attrib_name}").requires_grad = state
+
+    def to_state(self):
+        """
+        Pack current trainable state into a dictionary for checkpoint saving.
+        Compatible with 3DGS format and includes GaussianShader extensions.
+        
+        Returns:
+            Dictionary containing version, SH degree info, BRDF settings, and all tensors
+        """
+        state = {
+            'version': 1,
+            'active_sh_degree': self.active_sh_degree,
+            'max_sh_degree': self.max_sh_degree,
+            'brdf': self.brdf,
+            'brdf_dim': self.brdf_dim,
+            'brdf_mode': self.brdf_mode,
+            'brdf_envmap_res': self.brdf_envmap_res,
+            'spatial_lr_scale': getattr(self, 'spatial_lr_scale', 5),
+            # Core tensors
+            'xyz': self._xyz.detach().cpu(),
+            'f_dc': self._features_dc.detach().cpu(),
+            'f_rest': self._features_rest.detach().cpu(),
+            'opacity': self._opacity.detach().cpu(),
+            'scaling': self._scaling.detach().cpu(),
+            'rotation': self._rotation.detach().cpu(),
+        }
+        
+        # BRDF extras (if applicable)
+        if self.brdf:
+            state['extras'] = {
+                'roughness': self._roughness.detach().cpu(),
+                'specular': self._specular.detach().cpu(),
+                'normal': self._normal.detach().cpu(),
+                'normal2': self._normal2.detach().cpu(),
+            }
+            # Save BRDF MLP state
+            if self.brdf_mlp is not None:
+                state['brdf_mlp_state'] = self.brdf_mlp.state_dict()
+        
+        return state
+
+    @classmethod
+    def from_state(cls, state, device="cuda"):
+        """
+        Construct GaussianModel from a saved state dictionary.
+        Restores all parameters and registers them as trainable.
+        
+        Args:
+            state: State dictionary from to_state()
+            device: Device to place tensors on (default: "cuda")
+        
+        Returns:
+            GaussianModel instance with restored state
+        """
+        # Create model with saved configuration
+        sh_degree = state.get('max_sh_degree', 3)
+        brdf_dim = state.get('brdf_dim', -1)
+        brdf_mode = state.get('brdf_mode', 'envmap')
+        brdf_envmap_res = state.get('brdf_envmap_res', 64)
+        
+        model = cls(sh_degree, brdf_dim, brdf_mode, brdf_envmap_res)
+        
+        # Restore spatial learning rate scale
+        model.spatial_lr_scale = state.get('spatial_lr_scale', 5)
+        
+        # Restore core tensors as parameters
+        model._xyz = nn.Parameter(state['xyz'].to(device).requires_grad_(True))
+        model._features_dc = nn.Parameter(state['f_dc'].to(device).requires_grad_(True))
+        model._features_rest = nn.Parameter(state['f_rest'].to(device).requires_grad_(True))
+        model._opacity = nn.Parameter(state['opacity'].to(device).requires_grad_(True))
+        model._scaling = nn.Parameter(state['scaling'].to(device).requires_grad_(True))
+        model._rotation = nn.Parameter(state['rotation'].to(device).requires_grad_(True))
+        
+        # Initialize tracking tensors
+        num_points = model._xyz.shape[0]
+        model.max_radii2D = torch.zeros((num_points), device=device)
+        model.xyz_gradient_accum = torch.zeros((num_points, 1), device=device)
+        model.denom = torch.zeros((num_points, 1), device=device)
+        
+        # Restore BRDF extras if present
+        if model.brdf and 'extras' in state:
+            extras = state['extras']
+            model._roughness = nn.Parameter(extras['roughness'].to(device).requires_grad_(True))
+            model._specular = nn.Parameter(extras['specular'].to(device).requires_grad_(True))
+            model._normal = nn.Parameter(extras['normal'].to(device).requires_grad_(True))
+            model._normal2 = nn.Parameter(extras['normal2'].to(device).requires_grad_(True))
+        elif model.brdf:
+            # Initialize with defaults if not present in state
+            model._roughness = nn.Parameter(model.default_roughness * torch.ones((num_points, 1), device=device).requires_grad_(True))
+            model._specular = nn.Parameter(torch.zeros((num_points, 3), device=device).requires_grad_(True))
+            # Use minimum axis as default normal
+            normals = torch.zeros((num_points, 3), device=device)
+            model._normal = nn.Parameter(normals.requires_grad_(True))
+            model._normal2 = nn.Parameter(normals.clone().requires_grad_(True))
+        
+        # Restore BRDF MLP if present
+        if model.brdf and 'brdf_mlp_state' in state and model.brdf_mlp is not None:
+            model.brdf_mlp.load_state_dict(state['brdf_mlp_state'])
+        
+        # Restore active SH degree
+        model.active_sh_degree = state.get('active_sh_degree', model.max_sh_degree)
+        
+        return model
