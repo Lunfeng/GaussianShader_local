@@ -70,6 +70,77 @@ python train.py -s data/horse_blender --eval -m output/horse_blender -w --brdf_d
 python render.py -m output/horse_blender --brdf_dim 0 --sh_degree -1 --brdf_mode envmap --brdf_env 512
 ```
 
+## Checkpoint Save and Resume
+
+The training script now supports saving and resuming from checkpoints, allowing you to:
+- Save training state at specific iterations
+- Resume training from any checkpoint
+- Maintain reproducibility with RNG state preservation
+
+### Saving Checkpoints
+
+To save checkpoints during training, use the following parameters:
+
+```shell
+# Save checkpoint every 10000 iterations (default)
+python train.py -s data/horse_blender -m output/horse_blender --save_interval 10000
+
+# Save checkpoints at specific iterations (20000 and 30000)
+python train.py -s data/horse_blender -m output/horse_blender --save_at "20000,30000"
+
+# Limit the number of kept checkpoints to 3 most recent
+python train.py -s data/horse_blender -m output/horse_blender --save_interval 5000 --max_keep 3
+
+# Also save PLY snapshots with checkpoints
+python train.py -s data/horse_blender -m output/horse_blender --save_interval 10000 --save_snapshot_ply
+```
+
+Checkpoints are saved to `<output_path>/checkpoints/ckpt_<iteration>.pth` and include:
+- Model parameters (xyz, features, opacity, scaling, rotation)
+- BRDF parameters (roughness, specular, normals) if applicable
+- Optimizer state
+- Training iteration number
+- RNG states for reproducibility
+- Active SH degree
+
+### Resuming from Checkpoint
+
+To resume training from a saved checkpoint:
+
+```shell
+# Resume from a specific checkpoint
+python train.py -s data/horse_blender -m output/horse_blender --resume --resume_path output/horse_blender/checkpoints/ckpt_20000.pth
+
+# Resume and continue saving new checkpoints
+python train.py -s data/horse_blender -m output/horse_blender \
+  --resume --resume_path output/horse_blender/checkpoints/ckpt_20000.pth \
+  --save_interval 10000 --max_keep 2
+```
+
+When resuming:
+- Training continues from iteration N+1 where N is the checkpoint iteration
+- Active SH degree is restored from the checkpoint
+- Optimizer state is restored for smooth continuation
+- RNG states are restored for reproducible training
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--save_interval` | int | 10000 | Save checkpoint every N iterations |
+| `--save_at` | str | "" | Comma-separated list of specific iterations to save (e.g., "20000,30000") |
+| `--resume` | flag | False | Enable resume from checkpoint |
+| `--resume_path` | str | "" | Path to checkpoint file (.pth) |
+| `--max_keep` | int | 2 | Maximum number of recent checkpoints to keep (0 = keep all) |
+| `--save_snapshot_ply` | flag | False | Also save PLY snapshots with checkpoints |
+
+### Notes
+
+- `--save_at` takes priority over `--save_interval` for specified iterations
+- The `--max_keep` parameter automatically removes older checkpoints to save disk space
+- Checkpoints include all necessary state for exact training continuation
+- For BRDF mode, the environment lighting map state is also saved
+
 ## Dataset
 We mainly evaluate our method on [NeRF Synthetic](https://github.com/bmild/nerf), [Tanks&Temples](https://www.tanksandtemples.org), [Shiny Blender](https://github.com/google-research/multinerf) and [Glossy Synthetic](https://github.com/liuyuan-pal/NeRO). You can use ``nero2blender.py`` to convert the Glossy Synthetic data into Blender format.
 
