@@ -32,10 +32,31 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, dataset.brdf_dim, dataset.brdf_mode, dataset.brdf_envmap_res)
-
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    
+    # Checkpoint resume logic
+    first_iter = 1
+    if opt.resume and opt.resume_path:
+        from utils.checkpoint import load_checkpoint
+        
+        # Define optimizer creation function for checkpoint loading
+        def make_optimizer(model):
+            model.training_setup(opt)
+            return model.optimizer
+        
+        gaussians, _, first_iter, ckpt_data = load_checkpoint(
+            opt.resume_path, 
+            make_optimizer, 
+            device="cuda"
+        )
+        first_iter += 1  # Start from next iteration
+        scene = Scene(dataset, gaussians)
+        
+        print(f"Resuming from checkpoint: {opt.resume_path}")
+        print(f"Starting from iteration {first_iter}, active_sh_degree={gaussians.active_sh_degree}")
+    else:
+        gaussians = GaussianModel(dataset.sh_degree, dataset.brdf_dim, dataset.brdf_mode, dataset.brdf_envmap_res)
+        scene = Scene(dataset, gaussians)
+        gaussians.training_setup(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -45,8 +66,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(opt.iterations), desc="Training progress")
-    for iteration in range(1, opt.iterations + 1): 
+    
+    # Parse save_at parameter (comma-separated iterations)
+    save_at_iterations = set()
+    if opt.save_at:
+        save_at_iterations = set(int(x.strip()) for x in opt.save_at.split(',') if x.strip())
+    
+    # Track saved checkpoints for max_keep management
+    saved_checkpoints = []
+    
+    progress_bar = tqdm(range(first_iter, opt.iterations + 1), desc="Training progress", initial=first_iter-1, total=opt.iterations)
+    for iteration in range(first_iter, opt.iterations + 1): 
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -119,6 +149,48 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+            
+            # Checkpoint saving logic
+            should_save_checkpoint = (iteration in save_at_iterations) or \
+                                      (opt.save_interval > 0 and iteration % opt.save_interval == 0)
+            
+            if should_save_checkpoint:
+                from utils.checkpoint import save_checkpoint
+                
+                checkpoint_dir = os.path.join(dataset.model_path, "checkpoints")
+                checkpoint_path = os.path.join(checkpoint_dir, f"ckpt_{iteration}.pth")
+                
+                # Save checkpoint
+                save_checkpoint(
+                    checkpoint_path, 
+                    gaussians, 
+                    gaussians.optimizer, 
+                    iteration,
+                    extra={'ema_loss': ema_loss_for_log}
+                )
+                
+                # Track saved checkpoint
+                saved_checkpoints.append((iteration, checkpoint_path))
+                
+                # Manage max_keep: remove oldest checkpoints if exceeding limit
+                if opt.max_keep > 0 and len(saved_checkpoints) > opt.max_keep:
+                    # Sort by iteration to get oldest first
+                    saved_checkpoints.sort(key=lambda x: x[0])
+                    # Remove oldest checkpoints
+                    while len(saved_checkpoints) > opt.max_keep:
+                        old_iter, old_path = saved_checkpoints.pop(0)
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
+                            print(f"Removed old checkpoint: {old_path}")
+                
+                # Optional: save PLY snapshot
+                if opt.save_snapshot_ply:
+                    snapshot_dir = os.path.join(checkpoint_dir, f"iteration_{iteration}")
+                    os.makedirs(snapshot_dir, exist_ok=True)
+                    snapshot_path = os.path.join(snapshot_dir, "snapshot.ply")
+                    gaussians.save_ply(snapshot_path)
+                    print(f"PLY snapshot saved to {snapshot_path}")
+
 
             # Densification
             if iteration < opt.densify_until_iter:
