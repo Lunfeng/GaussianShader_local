@@ -81,6 +81,8 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
+        self.spatial_lr_scale = 1.0
+
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)

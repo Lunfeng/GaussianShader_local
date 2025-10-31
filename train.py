@@ -30,12 +30,19 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, load_iteration=None, stop_iteration=None):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, dataset.brdf_dim, dataset.brdf_mode, dataset.brdf_envmap_res)
 
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, load_iteration=load_iteration)
     gaussians.training_setup(opt)
+
+    start_iteration = scene.loaded_iter if scene.loaded_iter is not None else 0
+    if start_iteration > 0:
+        print(f"Resuming training from iteration {start_iteration}.")
+    if start_iteration >= opt.iterations:
+        print(f"Target iteration ({opt.iterations}) has already been reached. Nothing to optimize.")
+        return
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -45,8 +52,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(opt.iterations), desc="Training progress")
-    for iteration in range(1, opt.iterations + 1): 
+    progress_bar = tqdm(total=opt.iterations, initial=start_iteration, desc="Training progress")
+    for iteration in range(start_iteration + 1, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -100,15 +107,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         loss.backward()
 
         iter_end.record()
+        reached_stop_iteration = False
 
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                progress_bar.update(10)
-            if iteration == opt.iterations:
-                progress_bar.close()
+                delta = iteration - progress_bar.n
+                if delta > 0:
+                    progress_bar.update(delta)
+            elif iteration == opt.iterations or (stop_iteration is not None and iteration >= stop_iteration):
+                delta = iteration - progress_bar.n
+                if delta > 0:
+                    progress_bar.update(delta)
 
             # Keep track of max radii in image-space for pruning
             gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -119,6 +131,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+
+            if stop_iteration is not None and iteration >= stop_iteration:
+                if iteration not in saving_iterations:
+                    print("\n[ITER {}] Saving Gaussians".format(iteration))
+                    scene.save(iteration)
+                if progress_bar.n < iteration:
+                    progress_bar.update(iteration - progress_bar.n)
+                print(f"Reached stop iteration {stop_iteration}. Terminating training.")
+                reached_stop_iteration = True
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -139,6 +160,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
             if pipe.brdf and pipe.brdf_mode=="envmap":
                 gaussians.brdf_mlp.clamp_(min=0.0, max=1.0)
+        if reached_stop_iteration:
+            break
+    progress_bar.close()
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -232,10 +256,15 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--load_iteration", type=int, default=None, help="Iteration to load for resuming training (-1 for latest)")
+    parser.add_argument("--stop_iteration", type=int, default=None, help="Stop training after reaching this iteration")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
-    
+    if args.iterations not in args.save_iterations:
+        args.save_iterations.append(args.iterations)
+    if args.stop_iteration is not None and args.stop_iteration not in args.save_iterations:
+        args.save_iterations.append(args.stop_iteration)
+
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
@@ -244,7 +273,13 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations)
+    training(lp.extract(args),
+             op.extract(args),
+             pp.extract(args),
+             args.test_iterations,
+             args.save_iterations,
+             args.load_iteration,
+             args.stop_iteration)
 
     # All done
     print("\nTraining complete.")
